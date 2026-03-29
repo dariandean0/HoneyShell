@@ -61,6 +61,18 @@ docker compose down
 docker compose down -v
 ```
 
+## Testing SSH Honeypot Service
+
+```bash
+docker compose build
+docker compose up --build ssh-honeypot
+
+# In another terminal
+ssh -p 2222 -o StrictHostKeyChecking=no root@127.0.0.1
+
+# enter anything for the password, it will accept anything
+```
+
 ---
 
 ## Services at a Glance
