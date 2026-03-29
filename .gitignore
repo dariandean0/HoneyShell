@@ -1,0 +1,7 @@
+logs/
+*.db
+*.sqlite
+__pycache__/
+*.pyc
+.env
+*.log

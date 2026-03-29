@@ -1,0 +1,42 @@
+version: "3.9"
+
+networks:
+  honeypot-net:
+    internal: true
+
+volumes:
+  logdata:
+
+services:
+  ssh-honeypot:
+    build: ./ssh-honeypot
+    container_name: HoneyShell-ssh
+    networks: [honeypot-net]
+    ports:
+      - "127.0.0.1:2222:2222"
+    volumes:
+      - logdata:/app/logs
+    restart: unless-stopped
+
+  web-honeypot:
+    build: ./web-honeypot
+    container_name: HoneyShell-web
+    networks: [honeypot-net]
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - logdata:/app/logs
+    restart: unless-stopped
+
+  dashboard:
+    build: ./dashboard
+    container_name: HoneyShell-dashboard
+    networks: [honeypot-net]
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - logdata:/app/logs
+    depends_on:
+      - ssh-honeypot
+      - web-honeypot
+    restart: unless-stopped
