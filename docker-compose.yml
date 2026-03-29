@@ -1,11 +1,6 @@
-version: "3.9"
-
 networks:
   honeypot-net:
-    internal: true
-
-volumes:
-  logdata:
+    internal: false
 
 services:
   ssh-honeypot:
@@ -15,7 +10,7 @@ services:
     ports:
       - "127.0.0.1:2222:2222"
     volumes:
-      - logdata:/app/logs
+      - ./logs:/app/logs
     restart: unless-stopped
 
   web-honeypot:
@@ -25,7 +20,7 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      - logdata:/app/logs
+      - ./logs:/app/logs
     restart: unless-stopped
 
   dashboard:
@@ -35,7 +30,7 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
-      - logdata:/app/logs
+      - ./logs:/app/logs
     depends_on:
       - ssh-honeypot
       - web-honeypot
