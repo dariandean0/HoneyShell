@@ -11,7 +11,7 @@ HoneyShell is a localhost-only honeypot system built for educational purposes. I
 The system has three components:
 
 - **SSH Honeypot**  a fake SSH server (port 2222) that accepts all login attempts, presents a simulated shell, and logs every credential and command
-- **Web Honeypot**  a fake corporate login portal (port 8080) that logs credential stuffing, SQL injection probes, scanner fingerprints, and directory traversal attempts
+- **Web Honeypot**  a fake phpMyAdmin login portal (port 8080) that logs credential stuffing, SQL injection probes, scanner fingerprints, and honey-file scans (`/.env`, `/config.inc.php.bak`, `/phpinfo.php`, `/setup/`)
 - **Dashboard**  a local web UI (port 3000) that visualizes captured sessions, credential frequency, attack timelines, and behavioral patterns
 
 ---
@@ -71,6 +71,29 @@ docker compose up --build ssh-honeypot
 ssh -p 2222 -o StrictHostKeyChecking=no root@127.0.0.1
 
 # enter anything for the password, it will accept anything
+```
+
+## Testing Web Honeypot Service
+
+```bash
+docker compose build
+docker compose up --build web-honeypot
+
+# Open in a browser
+http://127.0.0.1:8080/
+
+# Or from another terminal — any credentials are accepted
+curl -c cookies.txt -d 'pma_username=root&pma_password=anything' \
+     http://127.0.0.1:8080/index.php
+
+# Post-auth SQL query box (logged verbatim)
+curl -b cookies.txt --data-urlencode "sql_query=SELECT * FROM users" \
+     'http://127.0.0.1:8080/index.php?route=/sql'
+
+# Honey files scanners commonly probe
+curl http://127.0.0.1:8080/.env
+curl http://127.0.0.1:8080/config.inc.php.bak
+curl http://127.0.0.1:8080/phpinfo.php
 ```
 
 ---
