@@ -141,6 +141,10 @@ def get_stats() -> dict:
     # Hourly timeline (last 24 buckets)
     timeline = _build_timeline(events)
 
+    iocs = _scan_iocs(events)
+    critical_iocs = sum(1 for i in iocs if i["severity"] == "Critical")
+    high_iocs     = sum(1 for i in iocs if i["severity"] == "High")
+
     return {
         "summary": {
             "total_events":    len(events),
@@ -150,6 +154,8 @@ def get_stats() -> dict:
             "unique_ips":      len(ip_counter),
             "bot_cmds":        bot_cmds,
             "human_cmds":      human_cmds,
+            "critical_iocs":   critical_iocs,
+            "high_iocs":       high_iocs,
         },
         "event_types":  [{"type": k, "count": v} for k, v in event_types.most_common()],
         "service_counts": [{"service": k, "count": v} for k, v in service_counts.most_common()],
@@ -158,6 +164,7 @@ def get_stats() -> dict:
         "top_cmds":     top_cmds,
         "recent":       recent,
         "timeline":     timeline,
+        "iocs":         iocs,
     }
 
 
@@ -188,7 +195,6 @@ def _event_detail(event_type: str, data: dict) -> str:
 
 def _build_timeline(events: list[dict]) -> list[dict]:
     """Count events per hour for the last 24 hours."""
-    from datetime import timedelta
     buckets: Counter = Counter()
     for e in events:
         ts = e.get("timestamp", "")
@@ -200,6 +206,87 @@ def _build_timeline(events: list[dict]) -> list[dict]:
     sorted_hours = sorted(buckets.keys())[-24:]
     return [{"hour": h.replace("T", " ") + ":00", "count": buckets[h]}
             for h in sorted_hours]
+
+
+# IOC detection
+
+_SSH_IOC_RULES = [
+    (["wget ", "curl "],                                    "Critical", "Download Attempt",     "Attempted to download an external file"),
+    (["sudo su", "sudo bash", "sudo -s ", "sudo sh"],       "Critical", "Privilege Escalation", "Attempted to escalate privileges to root"),
+    (["/etc/shadow"],                                       "Critical", "Shadow File Access",   "Accessed the shadow password file"),
+    (["nc ", "netcat ", "ncat ", "bash -i ", "/dev/tcp/"],  "Critical", "Reverse Shell",        "Attempted to establish a reverse shell"),
+    (["python -c", "python3 -c", "perl -e", "ruby -e"],    "High",     "Code Execution",       "Executed inline code in the shell"),
+    (["chmod +x", "bash ./", "sh ./"],                     "High",     "Script Execution",     "Attempted to execute a local script"),
+    (["crontab", "/etc/cron"],                             "High",     "Persistence",          "Attempted to establish persistence via cron"),
+    (["find / -perm", "find / -user root"],                "High",     "SUID Hunting",         "Searched for SUID privilege escalation vectors"),
+    (["/etc/passwd"],                                      "Medium",   "User Enumeration",     "Read the system user account list"),
+    (["uname", "/etc/os-release"],                         "Low",      "OS Fingerprinting",    "Gathered OS and kernel version information"),
+]
+
+_WEB_SQL_IOC_RULES = [
+    (["into outfile", "into dumpfile"],        "Critical", "SQL File Write",      "Attempted to write files via SQL INTO OUTFILE"),
+    (["load_file("],                           "High",     "SQL File Read",       "Attempted to read files via SQL LOAD_FILE"),
+    (["union select", "union all select"],     "High",     "SQL Data Extraction", "Used UNION SELECT to extract database contents"),
+    (["information_schema"],                   "Medium",   "Schema Enumeration",  "Enumerated the database schema structure"),
+]
+
+_SEVERITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+
+
+def _scan_iocs(events: list[dict]) -> list[dict]:
+    iocs = []
+
+    for e in events:
+        data = e.get("data") or {}
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = {}
+
+        event_type = e.get("event_type", "")
+        service    = e.get("service", "ssh")
+        ts         = e.get("timestamp", "")[:19].replace("T", " ")
+        source_ip  = data.get("source_ip") or data.get("ip", "—")
+
+        def _add(severity, ioc_type, desc, detail=""):
+            iocs.append({
+                "severity":    severity,
+                "type":        ioc_type,
+                "description": desc,
+                "timestamp":   ts,
+                "source_ip":   source_ip,
+                "service":     service,
+                "detail":      str(detail)[:100],
+            })
+
+        if event_type == "command":
+            cmd = data.get("command", "").lower()
+            for patterns, sev, ioc_type, desc in _SSH_IOC_RULES:
+                if any(p.lower() in cmd for p in patterns):
+                    _add(sev, ioc_type, desc, data.get("command", ""))
+                    break
+
+        elif event_type == "sql_query":
+            query = data.get("query", "").lower()
+            for patterns, sev, ioc_type, desc in _WEB_SQL_IOC_RULES:
+                if any(p in query for p in patterns):
+                    _add(sev, ioc_type, desc, data.get("query", "")[:80])
+                    break
+
+        elif event_type == "sql_injection":
+            detail = data.get("username", "") or data.get("input", "")
+            _add("High", "SQL Injection", "SQL injection payload detected in login form", detail)
+
+        elif event_type == "directory_traversal":
+            _add("High", "Directory Traversal", "Directory traversal attempt on web honeypot", data.get("input", ""))
+
+        elif event_type == "scanner_probe":
+            ua = data.get("user_agent", "")
+            _add("Medium", "Automated Scanner", "Known attack scanner or automated tool detected", ua[:80])
+
+    iocs.sort(key=lambda x: _SEVERITY_ORDER.get(x["severity"], 99))
+    return iocs[:50]
 
 
 # Routes
@@ -282,6 +369,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     .empty { color:#555; font-style:italic; text-align:center; padding:20px 0; }
     canvas { max-height: 220px; }
+
+    /* IOC severity badges */
+    .sev { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:700; letter-spacing:.3px; }
+    .sev-Critical { background:#4a1212; color:#f87171; }
+    .sev-High     { background:#4a2a0a; color:#fb923c; }
+    .sev-Medium   { background:#3a3000; color:#facc15; }
+    .sev-Low      { background:#0a2040; color:#60a5fa; }
   </style>
 </head>
 <body>
@@ -301,6 +395,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="card"><div class="val" id="c-ips">—</div><div class="label">Unique IPs</div></div>
     <div class="card green"><div class="val" id="c-human">—</div><div class="label">Human Cmds</div></div>
     <div class="card red"><div class="val" id="c-bot">—</div><div class="label">Bot Cmds</div></div>
+    <div class="card red"><div class="val" id="c-critical-iocs">—</div><div class="label">Critical IOCs</div></div>
+    <div class="card" style="border-color:#fb923c44"><div class="val" style="color:#fb923c" id="c-high-iocs">—</div><div class="label">High IOCs</div></div>
   </div>
 
   <!-- Timeline -->
@@ -344,6 +440,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <tbody id="tbl-cmds"><tr><td colspan="2" class="empty">No data yet</td></tr></tbody>
       </table>
     </div>
+  </div>
+
+  <!-- IOC Panel -->
+  <div class="panel" style="margin-top:16px; border-color:#3a1a1a">
+    <h2 style="color:#f87171">Indicators of Compromise (IOC)</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Severity</th><th>Type</th><th>Description</th>
+          <th>Source IP</th><th>Service</th><th>Time</th><th>Detail</th>
+        </tr>
+      </thead>
+      <tbody id="tbl-iocs"><tr><td colspan="7" class="empty">No IOCs detected</td></tr></tbody>
+    </table>
   </div>
 
   <!-- Recent events feed -->
@@ -426,8 +536,10 @@ async function refresh() {
   setText('c-ssh',     s.ssh_sessions);
   setText('c-web',     s.web_sessions);
   setText('c-ips',     s.unique_ips);
-  setText('c-human',   s.human_cmds);
-  setText('c-bot',     s.bot_cmds);
+  setText('c-human',        s.human_cmds);
+  setText('c-bot',          s.bot_cmds);
+  setText('c-critical-iocs', s.critical_iocs);
+  setText('c-high-iocs',     s.high_iocs);
   setText('last-updated', 'Updated ' + new Date().toLocaleTimeString());
 
   // Timeline
@@ -473,6 +585,22 @@ async function refresh() {
   buildRows('tbl-cmds', (stats.top_cmds||[]).map(r =>
     `<tr><td style="font-family:monospace">${esc(r.cmd)}</td><td>${r.count}</td></tr>`
   ));
+
+  // IOC table
+  buildRows('tbl-iocs', (stats.iocs||[]).map(r => {
+    const svc = r.service === 'ssh'
+      ? '<span class="badge ssh">SSH</span>'
+      : '<span class="badge web">WEB</span>';
+    return `<tr>
+      <td><span class="sev sev-${esc(r.severity)}">${esc(r.severity)}</span></td>
+      <td style="font-weight:600;color:#e0e0e0">${esc(r.type)}</td>
+      <td style="color:#aaa">${esc(r.description)}</td>
+      <td style="font-family:monospace;font-size:12px">${esc(r.source_ip)}</td>
+      <td>${svc}</td>
+      <td style="white-space:nowrap;font-size:11px;color:#666">${esc(r.timestamp)}</td>
+      <td style="font-family:monospace;font-size:11px;color:#888;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.detail)}</td>
+    </tr>`;
+  }));
 
   // Recent events feed
   buildRows('tbl-recent', (stats.recent||[]).map(r => {
