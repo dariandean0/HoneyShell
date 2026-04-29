@@ -117,6 +117,51 @@ def get_stats() -> dict:
             cmd_counter[cmd] += 1
     top_cmds = [{"cmd": k, "count": v} for k, v in cmd_counter.most_common(10)]
 
+    # Top SQL queries submitted via the web honeypot
+    sql_events = [e for e in events if e.get("event_type") == "sql_query"]
+    sql_counter: Counter = Counter()
+    for e in sql_events:
+        data = e.get("data") or {}
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = {}
+        q = (data.get("query") or "").strip()[:80]
+        if q:
+            sql_counter[q] += 1
+    top_web_queries = [{"query": k, "count": v} for k, v in sql_counter.most_common(10)]
+
+    # Top honey files accessed
+    honey_events = [e for e in events if e.get("event_type") == "honey_file"]
+    honey_counter: Counter = Counter()
+    for e in honey_events:
+        data = e.get("data") or {}
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = {}
+        path = data.get("path", "")
+        if path:
+            honey_counter[path] += 1
+    top_honey = [{"path": k, "count": v} for k, v in honey_counter.most_common(10)]
+
+    # Top probed paths (404s)
+    probe_events = [e for e in events if e.get("event_type") == "path_probe"]
+    probe_counter: Counter = Counter()
+    for e in probe_events:
+        data = e.get("data") or {}
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = {}
+        path = data.get("path", "")
+        if path:
+            probe_counter[path] += 1
+    top_probes = [{"path": k, "count": v} for k, v in probe_counter.most_common(10)]
+
     # Bot likelihood (SSH commands with gap_ms < 200)
     bot_cmds  = sum(1 for e in cmd_events if _is_bot(e))
     human_cmds = len(cmd_events) - bot_cmds
@@ -159,12 +204,15 @@ def get_stats() -> dict:
         },
         "event_types":  [{"type": k, "count": v} for k, v in event_types.most_common()],
         "service_counts": [{"service": k, "count": v} for k, v in service_counts.most_common()],
-        "top_creds":    top_creds,
-        "top_ips":      top_ips,
-        "top_cmds":     top_cmds,
-        "recent":       recent,
-        "timeline":     timeline,
-        "iocs":         iocs,
+        "top_creds":       top_creds,
+        "top_ips":         top_ips,
+        "top_cmds":        top_cmds,
+        "top_web_queries": top_web_queries,
+        "top_honey":       top_honey,
+        "top_probes":      top_probes,
+        "recent":          recent,
+        "timeline":        timeline,
+        "iocs":            iocs,
     }
 
 
@@ -183,10 +231,17 @@ def _event_detail(event_type: str, data: dict) -> str:
         return f"{data.get('username','')} / {data.get('password','')}"
     if event_type == "command":
         return data.get("command", "")
-    if event_type == "sql_injection":
-        return data.get("username", "") or data.get("input", "")
+    if event_type in ("sql_query", "sql_injection"):
+        return data.get("query", "") or data.get("username", "") or data.get("input", "")
+    if event_type == "file_upload":
+        name = data.get("filename", "")
+        size = data.get("size", "")
+        return f"{name} ({size} bytes)" if size != "" else name
     if event_type in ("path_probe", "page_visit", "honey_file"):
         return data.get("path", "")
+    if event_type == "connection":
+        ua = data.get("user_agent", "")
+        return (ua[:60] + ("…" if len(ua) > 60 else "")) or data.get("path", "")
     if event_type == "scanner_probe":
         ua = data.get("user_agent", "")
         return ua[:60] + ("…" if len(ua) > 60 else "")
@@ -359,9 +414,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .et-auth_attempt    { color:#60a5fa; }
     .et-login_attempt   { color:#f87171; }
     .et-command         { color:#4ade80; }
+    .et-sql_query       { color:#fb923c; }
     .et-sql_injection   { color:#fb923c; }
+    .et-file_upload     { color:#c084fc; }
     .et-directory_traversal { color:#c084fc; }
     .et-path_probe      { color:#facc15; }
+    .et-honey_file      { color:#facc15; }
     .et-scanner_probe   { color:#f472b6; }
     .et-connection      { color:#94a3b8; }
     .et-session_end     { color:#94a3b8; }
@@ -438,6 +496,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <table>
         <thead><tr><th>Command</th><th>#</th></tr></thead>
         <tbody id="tbl-cmds"><tr><td colspan="2" class="empty">No data yet</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Web honeypot tables row -->
+  <div class="grid-3" style="margin-top:0">
+    <div class="panel">
+      <h2>Top Web SQL Queries</h2>
+      <table>
+        <thead><tr><th>Query</th><th>#</th></tr></thead>
+        <tbody id="tbl-queries"><tr><td colspan="2" class="empty">No data yet</td></tr></tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <h2>Top Honey Files Hit</h2>
+      <table>
+        <thead><tr><th>Path</th><th>#</th></tr></thead>
+        <tbody id="tbl-honey"><tr><td colspan="2" class="empty">No data yet</td></tr></tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <h2>Top Probed Paths</h2>
+      <table>
+        <thead><tr><th>Path</th><th>#</th></tr></thead>
+        <tbody id="tbl-probes"><tr><td colspan="2" class="empty">No data yet</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -584,6 +667,21 @@ async function refresh() {
   // Top commands table
   buildRows('tbl-cmds', (stats.top_cmds||[]).map(r =>
     `<tr><td style="font-family:monospace">${esc(r.cmd)}</td><td>${r.count}</td></tr>`
+  ));
+
+  // Top web SQL queries table
+  buildRows('tbl-queries', (stats.top_web_queries||[]).map(r =>
+    `<tr><td style="font-family:monospace;font-size:11px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.query)}</td><td>${r.count}</td></tr>`
+  ));
+
+  // Top honey files table
+  buildRows('tbl-honey', (stats.top_honey||[]).map(r =>
+    `<tr><td style="font-family:monospace">${esc(r.path)}</td><td>${r.count}</td></tr>`
+  ));
+
+  // Top probed paths table
+  buildRows('tbl-probes', (stats.top_probes||[]).map(r =>
+    `<tr><td style="font-family:monospace">${esc(r.path)}</td><td>${r.count}</td></tr>`
   ));
 
   // IOC table
